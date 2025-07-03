@@ -1,0 +1,289 @@
+---
+title: "ncnr_data_prep"
+output: html_document
+date: "2025-07-03"
+---
+
+```{r setup, include=FALSE}
+#load data and libraries
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+library(haven)
+library(survival)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(dplyr)
+
+setwd("C:/Users/mwhite10/Downloads/pubsaf2506")
+cand_liin = read_sas("cand_liin.sas7bdat")
+tx_li = read_sas("tx_li.sas7bdat")
+stathist = read_sas("stathist_liin.sas7bdat")
+institution = read_sas("institution.sas7bdat")
+countries = read_sas("can_country2506.sas7bdat")
+```
+
+```{r cars}
+#filter candidates to inclusion criteria
+cand_list = cand_liin %>% 
+  filter(CAN_LISTING_DT >= mdy("01-01-2012") & CAN_LISTING_DT <= mdy("12-31-2022")) %>% 
+  filter(WL_ORG == "LI") %>%
+  filter(CAN_AGE_AT_LISTING >= 18)
+
+#merge with transplant and country datasets
+cand_tx_merged = merge(cand_list, tx_li, how = "left", all.x = TRUE)
+cand_tx_merged = cand_tx_merged %>% left_join(select(countries, PX_ID, CAN_HOME_COUNTRY))
+
+cand_tx_merged %>% filter(is.na(CAN_REM_DT) & !is.na(CAN_DEATH_DT))
+```
+
+```{r}
+#death date variable, waitlist end date
+df_cand_tx = cand_tx_merged %>% 
+  mutate(death_date_min = pmin(PERS_SSA_DEATH_DT, PERS_OPTN_DEATH_DT, CAN_DEATH_DT, TFL_DEATH_DT, na.rm = T),
+    waitlist_end_date = case_when(
+    is.na(REC_TX_DT) == FALSE ~ REC_TX_DT,
+    is.na(death_date_min) == FALSE ~ death_date_min,
+    is.na(CAN_REM_DT) == FALSE ~ CAN_REM_DT, ##then look at removal date
+    is.na(CAN_LAST_INACT_STAT_DT) == FALSE & CAN_LAST_INACT_STAT_DT > CAN_LAST_ACT_STAT_DT ~ CAN_LAST_INACT_STAT_DT,##then inactive date if after last active date
+    !is.na(CAN_LAST_ACT_STAT_DT) ~ CAN_LAST_ACT_STAT_DT, ##then last active
+    is.na(CAN_LAST_ACT_STAT_DT) & !is.na(CAN_LAST_INACT_STAT_DT) ~ CAN_LAST_INACT_STAT_DT,
+    TRUE ~ CAN_LAST_ACT_STAT_DT))
+```
+
+
+```{r}
+#split data into single and multiple registrations
+single_registrations = df_cand_tx %>% 
+  group_by(PERS_ID) %>%
+  filter(n() == 1)
+
+multiple_registrations = df_cand_tx %>%
+  group_by(PERS_ID) %>%
+  filter(n() > 1)
+```
+
+```{r}
+#distinguish type of multiple registration (concurrents must be collapsed into single listing)
+multiple_registrations = multiple_registrations %>%
+  mutate(list_type = case_when(
+    CAN_LISTING_DT < lag(waitlist_end_date) ~ "concurrent",
+    waitlist_end_date > lead(CAN_LISTING_DT) ~ "concurrent",
+    TRUE ~ "sequential")) 
+
+multiple_registrations = multiple_registrations[order(multiple_registrations$PERS_ID, multiple_registrations$waitlist_end_date), ]
+```
+
+```{r}
+
+ 
+multiple_registrations$transplant_num <- 1 
+for (i in 2:nrow(multiple_registrations)) {
+  if (!is.na(multiple_registrations$PERS_ID[i-1]) && 
+      !is.na(multiple_registrations$PERS_ID[i]) && 
+      !is.na(multiple_registrations$REC_TX_DT[i-1]) && 
+      !is.na(multiple_registrations$REC_TX_DT[i]) &&
+      multiple_registrations$PERS_ID[i-1] == multiple_registrations$PERS_ID[i] &&
+      multiple_registrations$REC_TX_DT[i-1] != multiple_registrations$REC_TX_DT[i]) {
+    
+    multiple_registrations$transplant_num[i] = multiple_registrations$transplant_num[i-1] + 1
+  }
+}
+
+for (i in 2:nrow(multiple_registrations)) {
+  if (!is.na(multiple_registrations$PERS_ID[i-1]) && 
+      !is.na(multiple_registrations$PERS_ID[i]) && 
+      multiple_registrations$PERS_ID[i-1] == multiple_registrations$PERS_ID[i] &&
+      !is.na(multiple_registrations$transplant_num[i-1]) && 
+      multiple_registrations$transplant_num[i-1] != multiple_registrations$transplant_num[i] &&
+      multiple_registrations$transplant_num[i-1] != 1) {
+    
+    multiple_registrations$transplant_num[i] = multiple_registrations$transplant_num[i-1]
+  }
+}
+
+multiple_registrations$transplant_num[multiple_registrations$list_type == 'sequential'] <- 0 
+
+for(i in 1:(nrow(multiple_registrations)-1)) { 
+  if(multiple_registrations$PERS_ID[i] == multiple_registrations$PERS_ID[i+1] &
+     multiple_registrations$list_type[i] == 'concurrent' & multiple_registrations$list_type[i+1] == 'concurrent' &
+     !is.na(multiple_registrations$REC_TX_DT[i]) & !is.na(multiple_registrations$REC_TX_DT[i+1]) &
+     multiple_registrations$REC_TX_DT[i] < multiple_registrations$REC_TX_DT[i+1] ) {
+    
+    multiple_registrations$REC_TX_DT[i] <- multiple_registrations$REC_TX_DT[i+1] ##if PERS_ID is the same as the NEXT row, both have concurrent listings, transplant dates for both are not NA, and transplant date is earlier than the next row's transplant date - update to next row's transplant date
+  }}
+
+
+sequential_lists <- multiple_registrations %>%
+  filter(list_type == "sequential") %>%
+  mutate(min_list_date = CAN_LISTING_DT)  
+
+
+multiple_registrations <- multiple_registrations %>% 
+  group_by(PERS_ID, transplant_num) %>%
+  mutate(min_list_date = min(CAN_LISTING_DT, na.rm=T))
+
+multiple_registrations <- multiple_registrations %>% mutate
+max_retransplants <- max(multiple_registrations$transplant_num) 
+
+collapsed_concurrent_registrations <- NULL 
+for(i in 1:max_retransplants) {
+  collapsed_concurrent_registrations <- rbind(collapsed_concurrent_registrations, 
+        
+  multiple_registrations %>%
+    filter(list_type == "concurrent" & transplant_num == i) %>% 
+    mutate(DON_TY = ifelse(DON_TY == "", NA, DON_TY),
+           last_wait_date = max(waitlist_end_date, na.rm = TRUE)) %>% 
+    fill(REC_TX_DT, .direction = "up") %>%
+    fill(DON_TY, .direction = "up") %>%
+    fill(DONOR_ID, .direction = "up") %>%
+    fill(CAN_REM_CD, .direction = "up") %>%
+    fill(CAN_HOME_COUNTRY, .direction = "up") %>%
+    select(-c(waitlist_end_date, CAN_LISTING_DT, CAN_REM_DT)) %>%
+    filter(row_number() ==1) %>%  
+    mutate(last_wait_date = case_when(
+      REC_TX_DT < last_wait_date ~ REC_TX_DT,
+      TRUE ~last_wait_date)))}
+```
+
+
+
+##recombine separated data frames
+
+```{r}
+#recombined data
+df_cand_tx <- bind_rows(single_registrations %>% ungroup(), 
+                          sequential_lists %>% ungroup(), 
+                          collapsed_concurrent_registrations %>% ungroup()) 
+
+#fix listing date 
+df_cand_tx = df_cand_tx %>% 
+  mutate(
+  min_list_date = if_else(is.na(min_list_date), as.Date(CAN_LISTING_DT), as.Date(min_list_date))
+)
+
+
+```
+
+
+```{r pressure, echo=FALSE}
+#transplant, ncnr variables
+df_cand_tx  = df_cand_tx %>% mutate(
+  transplant = ifelse(!is.na(REC_TX_DT), 1, 0),
+  non_cit_non_res = ifelse(!is.na(CAN_CITIZENSHIP) & CAN_CITIZENSHIP == 6, 1, 0),
+)
+
+#meld variables
+df_cand_tx = df_cand_tx %>%
+  mutate(
+    lab_meld = as.numeric(str_sub(CAN_INIT_SRTR_LAB_MELD, -2)),
+    allocation_meld = as.numeric(str_sub(CAN_INIT_STAT, -2)),
+  )
+
+#fix waitlist end date
+df_cand_tx = df_cand_tx %>% 
+  mutate(
+    waitlist_end_date = if_else(!is.na(waitlist_end_date), waitlist_end_date, last_wait_date)
+  )
+
+```
+
+```{r}
+#survival time, other outcomes
+df_cand_tx = df_cand_tx %>%
+  mutate(
+    survival_time = as.numeric(waitlist_end_date - min_list_date),
+    death = ifelse(death_date_min == waitlist_end_date, 1, 0),
+    removal = ifelse(CAN_REM_DT == waitlist_end_date & transplant == 0 & death == 0, 1, 0),
+    outcome = case_when(
+      transplant == 1 ~ "transplant",
+      death == 1 ~ "death",
+      removal == 1 ~ "removal",
+      TRUE ~ "censor"
+    ),
+    status = case_when(
+      outcome == "transplant" ~ 1,
+      outcome == "death" ~ 2,
+      outcome == "removal" ~ 3,
+      TRUE ~ 0
+    )
+  )
+
+#factor status for cuminc analyses
+df_cand_tx$status <- factor(df_cand_tx$status,
+                                       levels = c(0,1,2,3),
+                                       labels = c("censor", "transplant", "death", "removal"))
+
+#three patients death date prior to listing date
+df_cand_tx = df_cand_tx %>% filter(survival_time >= 0)
+```
+```{r}
+non_cits = df_cand_tx %>% filter(non_cit_non_res == 1)
+table(non_cits$CAN_HOME_COUNTRY)
+```
+```{r}
+#country code to country conversion
+df_cand_tx = df_cand_tx %>% 
+  mutate(
+    home_country = case_when(
+      non_cit_non_res == 0 ~ NA,
+      CAN_HOME_COUNTRY == "BER" ~ "Bermuda",
+      CAN_HOME_COUNTRY == "BHR" ~ "Bahrain",
+      CAN_HOME_COUNTRY == "BRA" ~ "Brazil",
+      CAN_HOME_COUNTRY == "BUD" ~ "Burundi",
+      CAN_HOME_COUNTRY == "BUR" ~ "Burundi",
+      CAN_HOME_COUNTRY == "BVI" ~ "British Virgin Islands",
+      CAN_HOME_COUNTRY == "CAM" ~ "Cambodia",
+      CAN_HOME_COUNTRY == "CAN" ~ "Canada",
+      CAN_HOME_COUNTRY == "CHI" ~ "China",
+      CAN_HOME_COUNTRY == "CHL" ~ "Chile",
+      CAN_HOME_COUNTRY == "CSR" ~ "Costa Rica",
+      CAN_HOME_COUNTRY == "CYI" ~ "Cayman Islands",
+      CAN_HOME_COUNTRY == "DOR" ~ "Domincan Republic",
+      CAN_HOME_COUNTRY == "EGY" ~ "Egypt",
+      CAN_HOME_COUNTRY == "ENG" ~ "England",
+      CAN_HOME_COUNTRY == "ESV" ~ "El Salvador",
+      CAN_HOME_COUNTRY == "GRC" ~ "Greece",
+      CAN_HOME_COUNTRY == "GTL" ~ "Guatemala", 
+      CAN_HOME_COUNTRY == "IND" ~ "India",
+      CAN_HOME_COUNTRY == "IRE" ~ "Ireland",
+      CAN_HOME_COUNTRY == "ISR" ~ "Israel",
+      CAN_HOME_COUNTRY == "JOR" ~ "Jordan",
+      CAN_HOME_COUNTRY == "JPN" ~ "Japan",
+      CAN_HOME_COUNTRY == "KUW" ~ "Kuwait",
+      CAN_HOME_COUNTRY == "LEB" ~ "Lebanon",
+      CAN_HOME_COUNTRY == "MEX" ~ "Mexico",
+      CAN_HOME_COUNTRY == "NIC" ~ "Nicaragua",
+      CAN_HOME_COUNTRY == "PAN" ~ "Panama",
+      CAN_HOME_COUNTRY == "PER" ~ "Peru",
+      CAN_HOME_COUNTRY == "PHL" ~ "Philippines",
+      CAN_HOME_COUNTRY == "PRY" ~ "Paraguay",
+      CAN_HOME_COUNTRY == "QAT" ~ "Qatar",
+      CAN_HOME_COUNTRY == "RUS" ~ "Russia",
+      CAN_HOME_COUNTRY == "SAF" ~ "South Africa",
+      CAN_HOME_COUNTRY == "SAU" ~ "Saudi Arabia",
+      CAN_HOME_COUNTRY == "SGP" ~ "Singapore",
+      CAN_HOME_COUNTRY == "SKR" ~ "South Korea",
+      CAN_HOME_COUNTRY == "SWT" ~ "Switzerland",
+      CAN_HOME_COUNTRY == "TRK" ~ "Turkey",
+      CAN_HOME_COUNTRY == "UAE" ~ "United Arab Emirates",
+      CAN_HOME_COUNTRY == "VEN" ~ "Venezuela",
+      CAN_HOME_COUNTRY == "VTN" ~ "Vietnam",
+      TRUE ~ NA
+    )
+  )
+
+#define regions
+df_cand_tx = df_cand_tx %>% mutate(
+  home_region = case_when(
+    home_country %in% c("Brazil","Chile", "Costa Rica",  "Dominican Republic", "Ecuador","El Salvador",  "Guatemala", "Mexico", "Nicaragua", "Panama", "Peru", "Paraguay", "Venezuela") ~ "Latin America",
+    home_country %in% c("Bermuda", "British Virgin Islands", "Burundi", "Canada", "Cayman Islands", "England", "Egypt", "Greece", "Ireland", "Russia", "South Africa", "Switzerland") ~ "Other",
+    home_country %in% c("Bahrain", "Israel", "Jordan", "Kuwait", "Qatar", "Saudi Arabia", "Turkey", "United Arab Emirates") ~ "Middle East",
+    is.na(home_country) & non_cit_non_res == 0 ~ NA,
+    is.na(home_country) & non_cit_non_res == 1 ~ "Unknown",
+    TRUE ~ "Asia"
+  )
+)
+
+```
+
