@@ -195,7 +195,7 @@ df_cand_tx = df_cand_tx %>%
     survival_time = as.numeric(waitlist_end_date - min_list_date),
     ld_transplant = ifelse(dd_transplant == 0 & !is.na(REC_TX_DT), 1, 0),
     death = ifelse(death_date_min == waitlist_end_date, 1, 0),
-    removal = ifelse(CAN_REM_DT == waitlist_end_date & transplant == 0 & death == 0, 1, 0),
+    removal = ifelse(CAN_REM_DT == waitlist_end_date & dd_transplant == 0 & ld_transplant == 0 & death == 0, 1, 0),
     outcome = case_when(
       dd_transplant == 1 ~ "deceased donor transplant",
       ld_transplant == 1 ~ "living donor transplant",
@@ -222,6 +222,8 @@ df_cand_tx = df_cand_tx %>% filter(survival_time >= 0)
 
 df_cand_tx %>% filter(ld_transplant == 1)
 ```
+
+
 ```{r}
 non_cits = df_cand_tx %>% filter(non_cit_non_res == 1)
 table(non_cits$CAN_HOME_COUNTRY)
