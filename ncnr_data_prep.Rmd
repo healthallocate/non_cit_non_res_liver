@@ -169,7 +169,7 @@ df_cand_tx = df_cand_tx %>%
 ```{r pressure, echo=FALSE}
 #transplant, ncnr variables
 df_cand_tx  = df_cand_tx %>% mutate(
-  transplant = ifelse(!is.na(REC_TX_DT), 1, 0),
+  dd_transplant = ifelse(!is.na(REC_TX_DT) & DON_TY == 'C', 1, 0),
   non_cit_non_res = ifelse(!is.na(CAN_CITIZENSHIP) & CAN_CITIZENSHIP == 6, 1, 0),
 )
 
@@ -193,29 +193,34 @@ df_cand_tx = df_cand_tx %>%
 df_cand_tx = df_cand_tx %>%
   mutate(
     survival_time = as.numeric(waitlist_end_date - min_list_date),
+    ld_transplant = ifelse(dd_transplant == 0 & !is.na(REC_TX_DT), 1, 0),
     death = ifelse(death_date_min == waitlist_end_date, 1, 0),
     removal = ifelse(CAN_REM_DT == waitlist_end_date & transplant == 0 & death == 0, 1, 0),
     outcome = case_when(
-      transplant == 1 ~ "transplant",
+      dd_transplant == 1 ~ "deceased donor transplant",
+      ld_transplant == 1 ~ "living donor transplant",
       death == 1 ~ "death",
       removal == 1 ~ "removal",
       TRUE ~ "censor"
     ),
     status = case_when(
-      outcome == "transplant" ~ 1,
-      outcome == "death" ~ 2,
-      outcome == "removal" ~ 3,
+      outcome == "deceased donor transplant" ~ 1,
+      outcome == "living donor transplant" ~ 2,
+      outcome == "death" ~ 3,
+      outcome == "removal" ~ 4,
       TRUE ~ 0
     )
   )
 
 #factor status for cuminc analyses
 df_cand_tx$status <- factor(df_cand_tx$status,
-                                       levels = c(0,1,2,3),
-                                       labels = c("censor", "transplant", "death", "removal"))
+                                       levels = c(0,1,2,3, 4),
+                                       labels = c("censor", "deceased donor transplant", "living donor transplant", "death", "removal"))
 
 #three patients death date prior to listing date
 df_cand_tx = df_cand_tx %>% filter(survival_time >= 0)
+
+df_cand_tx %>% filter(ld_transplant == 1)
 ```
 ```{r}
 non_cits = df_cand_tx %>% filter(non_cit_non_res == 1)
